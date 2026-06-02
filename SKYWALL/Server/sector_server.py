@@ -460,6 +460,7 @@ class SkyWALLServer:
         self.nodes: Dict[str, NodeInfo] = {}
         self.tdoa_buffer: Dict[str, List[TDOAEntry]] = defaultdict(list)
         self.triangulator = TDOATriangulator()
+        self._sse_subscribers: List[web.StreamResponse] = []
         self.app = web.Application()
         self.session: Optional[aiohttp.ClientSession] = None
         self._setup_routes()
@@ -484,8 +485,9 @@ class SkyWALLServer:
         self.app.router.add_get( "/api/v1/nodes",        self.handle_get_nodes)
         self.app.router.add_get( "/api/v1/stats",        self.handle_get_stats)
         self.app.router.add_get( "/api/v1/status",       self.handle_status)
-        self.app.router.add_get( "/",                    self.handle_dashboard)
-        self.app.router.add_get( "/dashboard",           self.handle_dashboard)
+        self.app.router.add_get( "/",                      self.handle_dashboard)
+        self.app.router.add_get( "/dashboard",             self.handle_dashboard)
+        self.app.router.add_get( "/api/v1/events/stream",  self.handle_sse)
         self.app.on_startup.append(self._on_startup)
         self.app.on_shutdown.append(self._on_shutdown)
 
@@ -534,6 +536,9 @@ class SkyWALLServer:
         if det:
             self.db.save_detection(det, raw_json=json.dumps(payload))
 
+            # Broadcast to SSE dashboard subscribers
+            asyncio.create_task(self._broadcast_sse('detection', asdict(det)))
+
             # Escalate if high/medium threat
             if self.session:
                 asyncio.create_task(self.escalator.escalate(det, self.session))
@@ -566,6 +571,9 @@ class SkyWALLServer:
 
         self.nodes[node_id] = node
         self.db.upsert_node(node)
+        asyncio.create_task(self._broadcast_sse('heartbeat', {
+            'node_id': node_id, 'mode': node.mode, 'timestamp': node.last_seen
+        }))
         return web.json_response({"status": "ok", "server_time": time.time()})
 
     async def handle_tdoa(self, request: web.Request) -> web.Response:
@@ -636,8 +644,44 @@ class SkyWALLServer:
 
     async def handle_dashboard(self, request: web.Request) -> web.Response:
         """Serve the HTML dashboard."""
-        html = DASHBOARD_HTML
-        return web.Response(text=html, content_type="text/html")
+        return web.Response(text=DASHBOARD_HTML, content_type="text/html")
+
+    async def handle_sse(self, request: web.Request) -> web.StreamResponse:
+        """Server-Sent Events endpoint for real-time dashboard updates."""
+        resp = web.StreamResponse()
+        resp.headers['Content-Type']      = 'text/event-stream'
+        resp.headers['Cache-Control']     = 'no-cache'
+        resp.headers['Connection']        = 'keep-alive'
+        resp.headers['X-Accel-Buffering'] = 'no'
+        await resp.prepare(request)
+        self._sse_subscribers.append(resp)
+        log.debug(f"SSE client connected ({len(self._sse_subscribers)} total)")
+        try:
+            while True:
+                await asyncio.sleep(15)
+                await resp.write(b': ping\n\n')
+        except (asyncio.CancelledError, ConnectionResetError, Exception):
+            pass
+        finally:
+            if resp in self._sse_subscribers:
+                self._sse_subscribers.remove(resp)
+            log.debug(f"SSE client disconnected ({len(self._sse_subscribers)} remaining)")
+        return resp
+
+    async def _broadcast_sse(self, event_type: str, data: dict):
+        """Push a JSON event to all connected SSE clients."""
+        if not self._sse_subscribers:
+            return
+        msg = f"event: {event_type}\ndata: {json.dumps(data)}\n\n".encode()
+        dead = []
+        for sub in list(self._sse_subscribers):
+            try:
+                await sub.write(msg)
+            except Exception:
+                dead.append(sub)
+        for d in dead:
+            if d in self._sse_subscribers:
+                self._sse_subscribers.remove(d)
 
     # ── Parsing ───────────────────────────────────────────────────────────────
 
@@ -698,148 +742,432 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SKYWALL Sector Dashboard</title>
+  <title>SKYWALL // SECTOR COMMAND</title>
   <style>
+    :root {
+      --bg:     #03060a;
+      --panel:  #060d16;
+      --panel2: #080f1a;
+      --border: #0e2540;
+      --brd2:   #1a3a60;
+      --acc:    #0077ee;
+      --acc2:   #00bbff;
+      --green:  #00ee77;
+      --red:    #ff1a3c;
+      --red2:   #ff4466;
+      --amber:  #ff9900;
+      --yellow: #ffee22;
+      --text:   #c0d4e8;
+      --dim:    #3a5570;
+      --mono:   'Courier New', monospace;
+    }
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { background: #0a0a0f; color: #e0e0e0; font-family: 'Courier New', monospace; }
-    header { background: #0d1117; border-bottom: 1px solid #1e3a5f; padding: 16px 24px;
-             display: flex; justify-content: space-between; align-items: center; }
-    header h1 { color: #4a9eff; font-size: 22px; letter-spacing: 4px; }
-    header .status { font-size: 12px; color: #7f7f7f; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 16px; padding: 20px 24px; }
-    .card { background: #0d1117; border: 1px solid #1e3a5f; border-radius: 8px; padding: 16px; }
-    .card h3 { font-size: 11px; color: #7f7f7f; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 8px; }
-    .card .value { font-size: 36px; font-weight: bold; color: #4a9eff; }
-    .card .sub { font-size: 11px; color: #666; margin-top: 4px; }
-    .section { padding: 0 24px 24px; }
-    .section h2 { font-size: 13px; color: #7f7f7f; text-transform: uppercase;
-                  letter-spacing: 2px; margin-bottom: 12px; border-bottom: 1px solid #1e3a5f;
-                  padding-bottom: 8px; }
-    table { width: 100%; border-collapse: collapse; font-size: 12px; }
-    th { text-align: left; padding: 8px 12px; color: #7f7f7f; font-weight: normal;
-         border-bottom: 1px solid #1e3a5f; }
-    td { padding: 8px 12px; border-bottom: 1px solid #111; }
-    tr:hover td { background: #0d1117; }
-    .badge { display: inline-block; padding: 2px 8px; border-radius: 4px;
-             font-size: 10px; font-weight: bold; }
-    .badge-HIGH   { background: #7f0000; color: #ff6b6b; }
-    .badge-MEDIUM { background: #5a3000; color: #ffaa44; }
-    .badge-LOW    { background: #3a3a00; color: #dddd44; }
-    .badge-NONE   { background: #1a1a1a; color: #888; }
-    .badge-alive  { background: #003a00; color: #44cc44; }
-    .badge-dead   { background: #3a0000; color: #cc4444; }
-    .refresh-btn { background: #1e3a5f; color: #4a9eff; border: 1px solid #2a5080;
-                   padding: 6px 16px; border-radius: 4px; cursor: pointer; font-family: inherit;
-                   font-size: 12px; }
-    .refresh-btn:hover { background: #2a5080; }
-    #last-refresh { font-size: 11px; color: #555; margin-left: 12px; }
+    body { background: var(--bg); color: var(--text); font-family: var(--mono);
+           min-height: 100vh; overflow-x: hidden; }
+
+    /* ── HEADER ── */
+    header { background: var(--panel); border-bottom: 1px solid var(--brd2);
+             padding: 0 24px; height: 52px; display: flex; align-items: center;
+             gap: 20px; position: sticky; top: 0; z-index: 100; }
+    .logo { font-size: 17px; font-weight: bold; letter-spacing: 5px; color: var(--acc2); white-space: nowrap; }
+    .logo span { color: var(--dim); }
+    .hclock { font-size: 13px; color: var(--green); letter-spacing: 2px; }
+    .live-pill { display: flex; align-items: center; gap: 5px; font-size: 10px;
+                 letter-spacing: 2px; color: var(--green); }
+    .live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green);
+                animation: pg 1.4s ease-in-out infinite; }
+    @keyframes pg { 0%,100%{opacity:1;box-shadow:0 0 6px var(--green)} 50%{opacity:.3;box-shadow:none} }
+    .hspacer { flex: 1; }
+    .threat-pill { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+    .tbadge { background: var(--red); color: #fff; padding: 2px 10px; border-radius: 2px;
+              font-size: 11px; font-weight: bold; letter-spacing: 1px; min-width: 26px; text-align: center; }
+    .tbadge.z { background: #0d1e10; color: var(--dim); }
+    .hver { font-size: 10px; color: var(--dim); letter-spacing: 1px; }
+
+    /* ── ALERT BANNER ── */
+    #banner { background: linear-gradient(90deg,#1a0004,#2a0008,#1a0004);
+              border-bottom: 1px solid var(--red); padding: 7px 24px;
+              display: none; align-items: center; gap: 14px;
+              animation: fb .4s ease-in-out 4; }
+    #banner.show { display: flex; }
+    @keyframes fb { 0%,100%{background:linear-gradient(90deg,#1a0004,#2a0008,#1a0004)}
+                    50%{background:linear-gradient(90deg,#350008,#550014,#350008)} }
+    .bicon { color: var(--red); font-size: 15px; animation: blink .5s step-end infinite; }
+    @keyframes blink { 50%{opacity:0} }
+    #btext { color: var(--red2); font-size: 11px; letter-spacing: 1px; }
+
+    /* ── STATS ROW ── */
+    .srow { display: grid; grid-template-columns: repeat(4,1fr); gap: 1px;
+            background: var(--border); border-bottom: 1px solid var(--brd2); }
+    .scard { background: var(--panel); padding: 14px 20px; }
+    .slabel { font-size: 9px; letter-spacing: 3px; color: var(--dim);
+              text-transform: uppercase; margin-bottom: 5px; }
+    .sval { font-size: 32px; font-weight: bold; color: var(--acc2); line-height: 1; }
+    .sval.thr { color: var(--red); }
+    .sval.nod { color: var(--green); }
+    .sval.tot { color: var(--acc); }
+    .ssub { font-size: 9px; color: var(--dim); margin-top: 3px; }
+
+    /* ── SCAN LINE ── */
+    .scanwrap { overflow: hidden; height: 1px; background: var(--panel); }
+    .scanline { width: 60%; height: 1px; background: linear-gradient(90deg,transparent,var(--acc2),transparent);
+                animation: scan 2.5s linear infinite; }
+    @keyframes scan { from{transform:translateX(-80%)} to{transform:translateX(200%)} }
+
+    /* ── MAIN GRID ── */
+    .mgrid { display: grid; grid-template-columns: 1fr 320px; gap: 1px;
+             background: var(--border); }
+
+    /* ── PANEL ── */
+    .panel { background: var(--panel); display: flex; flex-direction: column; }
+    .ph { padding: 9px 16px; border-bottom: 1px solid var(--border);
+          display: flex; align-items: center; gap: 10px; }
+    .ptitle { font-size: 9px; letter-spacing: 3px; color: var(--dim); text-transform: uppercase; }
+    .pcount { font-size: 10px; color: var(--acc); margin-left: auto; }
+
+    /* ── NODES TABLE ── */
+    .ntable { width: 100%; border-collapse: collapse; font-size: 11px; }
+    .ntable th { text-align: left; padding: 6px 14px; color: var(--dim); font-weight: normal;
+                 font-size: 9px; letter-spacing: 2px; border-bottom: 1px solid var(--border); }
+    .ntable td { padding: 6px 14px; border-bottom: 1px solid #080f16; }
+    .ntable tr:hover td { background: #080f18; }
+    .nalive { color: var(--green); }
+    .nalive::before { content:''; width:5px; height:5px; border-radius:50%; background:var(--green);
+                      display:inline-block; margin-right:5px; animation: pg 2s ease-in-out infinite; }
+    .ndead { color: var(--dim); }
+    .ndead::before { content: '○ '; }
+    .mbadge { padding: 1px 6px; border-radius: 2px; font-size: 9px; letter-spacing: 1px; }
+    .mSLEEP    { background:#081520; color:#2a5080; }
+    .mALERT    { background:#221800; color:var(--amber); }
+    .mTRACK    { background:#180020; color:#cc44ff; }
+    .mDOCUMENT { background:#001820; color:var(--acc); }
+    .mPATROL   { background:#001810; color:var(--green); }
+    .mUNKNOWN  { background:#111; color:var(--dim); }
+
+    /* ── ALERT FEED ── */
+    .afeed { flex:1; overflow-y:auto; }
+    .aitem { padding: 8px 14px; border-bottom: 1px solid #080f16; display: grid;
+             grid-template-columns: 1fr auto; gap: 8px; align-items: center;
+             animation: si .25s ease-out; }
+    @keyframes si { from{opacity:0;transform:translateX(8px)} to{opacity:1;transform:translateX(0)} }
+    .aitem.HIGH   { border-left: 3px solid var(--red); }
+    .aitem.MEDIUM { border-left: 3px solid var(--amber); }
+    .aitem.LOW    { border-left: 3px solid var(--yellow); }
+    .aitem.NONE   { border-left: 3px solid var(--dim); }
+    .aclass { font-size: 11px; font-weight: bold; }
+    .aclass.HIGH   { color: var(--red2); }
+    .aclass.MEDIUM { color: var(--amber); }
+    .aclass.LOW    { color: var(--yellow); }
+    .aclass.NONE   { color: var(--dim); }
+    .ameta { font-size: 9px; color: var(--dim); }
+    .abearing { font-size: 16px; font-weight: bold; color: var(--text); }
+    .atime { font-size: 9px; color: var(--dim); }
+
+    /* ── LOG TABLE ── */
+    .logsec { background: var(--panel2); border-top: 1px solid var(--brd2); }
+    .ltable { width: 100%; border-collapse: collapse; font-size: 11px; }
+    .ltable th { text-align: left; padding: 6px 14px; color: var(--dim); font-weight: normal;
+                 font-size: 9px; letter-spacing: 2px; border-bottom: 1px solid var(--brd2);
+                 position: sticky; top: 0; background: var(--panel2); z-index: 10; }
+    .ltable td { padding: 5px 14px; border-bottom: 1px solid #080e14; }
+    .ltable tr:hover td { background: #070c12; }
+    .ltable tr.HIGH   td:first-child { border-left: 3px solid var(--red); }
+    .ltable tr.MEDIUM td:first-child { border-left: 3px solid var(--amber); }
+    .ltable tr.LOW    td:first-child { border-left: 3px solid var(--yellow); }
+    .badge { display: inline-block; padding: 1px 7px; border-radius: 2px;
+             font-size: 9px; font-weight: bold; letter-spacing: 1px; }
+    .bHIGH   { background:#280006; color:var(--red2);  border:1px solid #500010; }
+    .bMEDIUM { background:#221500; color:var(--amber);  border:1px solid #443000; }
+    .bLOW    { background:#181400; color:var(--yellow); border:1px solid #302c00; }
+    .bNONE   { background:#0a0e10; color:var(--dim);    border:1px solid var(--border); }
+    .cbar { display:inline-block; width:44px; height:3px; background:var(--border);
+            border-radius:2px; overflow:hidden; vertical-align:middle; margin-left:5px; }
+    .cfill { height:100%; border-radius:2px; }
+
+    /* ── FOOTER ── */
+    footer { background: var(--panel); border-top: 1px solid var(--border);
+             padding: 7px 24px; display: flex; align-items: center;
+             gap: 20px; font-size: 10px; color: var(--dim); }
+    footer .ml { margin-left: auto; }
+
+    /* ── MISC ── */
+    ::-webkit-scrollbar { width: 3px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--brd2); border-radius: 2px; }
+    .empty { padding: 20px; text-align: center; color: var(--dim);
+             font-size: 10px; letter-spacing: 2px; }
+    .btn { background: var(--brd2); color: var(--acc); border: none; padding: 3px 12px;
+           font-family: var(--mono); font-size: 9px; letter-spacing: 2px;
+           cursor: pointer; border-radius: 2px; }
+    .btn:hover { background: #254870; }
+
+    @media (max-width: 860px) {
+      .mgrid { grid-template-columns: 1fr; }
+      .srow  { grid-template-columns: repeat(2,1fr); }
+    }
   </style>
 </head>
 <body>
-  <header>
-    <h1>&#x25A0; SKYWALL SECTOR</h1>
-    <div style="display:flex;align-items:center;">
-      <button class="refresh-btn" onclick="refresh()">Refresh</button>
-      <span id="last-refresh"></span>
-      <div class="status" style="margin-left:20px;">v""" + SERVER_VERSION + """</div>
+
+<!-- HEADER -->
+<header>
+  <div class="logo">&#x25A0;&nbsp;SKYWALL<span> // </span>SECTOR</div>
+  <div class="live-pill"><div class="live-dot"></div>LIVE</div>
+  <div class="hclock" id="clock">00:00:00Z</div>
+  <div class="hspacer"></div>
+  <div class="threat-pill">
+    <span style="font-size:9px;color:var(--dim);letter-spacing:1px">THREATS</span>
+    <span class="tbadge z" id="tbadge">0</span>
+  </div>
+  <div class="hver">v""" + SERVER_VERSION + """</div>
+</header>
+
+<!-- ALERT BANNER -->
+<div id="banner">
+  <span class="bicon">&#x26A0;</span>
+  <span id="btext">HIGH THREAT DETECTED</span>
+</div>
+
+<!-- STATS -->
+<div class="srow">
+  <div class="scard">
+    <div class="slabel">Events Today</div>
+    <div class="sval" id="s-et">&#x2014;</div>
+    <div class="ssub">24h window</div>
+  </div>
+  <div class="scard">
+    <div class="slabel">Active Threats</div>
+    <div class="sval thr" id="s-th">&#x2014;</div>
+    <div class="ssub">HIGH confidence</div>
+  </div>
+  <div class="scard">
+    <div class="slabel">Live Nodes</div>
+    <div class="sval nod" id="s-an">&#x2014;</div>
+    <div class="ssub" id="s-ns">of 0 registered</div>
+  </div>
+  <div class="scard">
+    <div class="slabel">Total Events</div>
+    <div class="sval tot" id="s-tot">&#x2014;</div>
+    <div class="ssub">all time</div>
+  </div>
+</div>
+
+<div class="scanwrap"><div class="scanline"></div></div>
+
+<!-- MAIN GRID -->
+<div class="mgrid">
+
+  <!-- NODES -->
+  <div class="panel">
+    <div class="ph">
+      <div class="ptitle">&#x25B6; Node Status</div>
+      <div class="pcount" id="ncount">0 nodes</div>
     </div>
-  </header>
-
-  <div class="grid" id="stats-grid">
-    <div class="card"><h3>Events Today</h3><div class="value" id="events-today">-</div></div>
-    <div class="card"><h3>Threats Today</h3><div class="value" id="threats-today" style="color:#ff6b6b">-</div></div>
-    <div class="card"><h3>Active Nodes</h3><div class="value" id="active-nodes">-</div></div>
-    <div class="card"><h3>Total Events</h3><div class="value" id="events-total">-</div></div>
+    <div style="overflow-x:auto;flex:1">
+      <table class="ntable">
+        <thead><tr>
+          <th>NODE ID</th><th>STATUS</th><th>MODE</th>
+          <th>BATT</th><th>DETECTIONS</th><th>LAST SEEN</th>
+        </tr></thead>
+        <tbody id="nbody"><tr><td colspan="6" class="empty">Awaiting nodes...</td></tr></tbody>
+      </table>
+    </div>
   </div>
 
-  <div class="section">
-    <h2>Active Nodes</h2>
-    <table id="nodes-table">
-      <thead><tr><th>Node ID</th><th>Status</th><th>Mode</th><th>Battery</th><th>Last Seen</th></tr></thead>
-      <tbody id="nodes-body"><tr><td colspan="5">Loading...</td></tr></tbody>
+  <!-- ALERT FEED -->
+  <div class="panel" style="border-left:1px solid var(--border)">
+    <div class="ph">
+      <div class="ptitle">&#x26A0; Alert Feed</div>
+      <div class="pcount" id="acount">0 alerts</div>
+    </div>
+    <div class="afeed" id="afeed">
+      <div class="empty">No active alerts</div>
+    </div>
+  </div>
+
+</div>
+
+<!-- DETECTION LOG -->
+<div class="logsec">
+  <div class="ph" style="border-bottom:1px solid var(--brd2)">
+    <div class="ptitle">&#x25BC; Detection Log</div>
+    <div style="margin-left:auto;display:flex;gap:10px;align-items:center">
+      <button class="btn" onclick="exportCSV()">EXPORT CSV</button>
+      <div id="lupd" style="font-size:9px;color:var(--dim)">&#x2014;</div>
+    </div>
+  </div>
+  <div style="overflow-x:auto;max-height:280px;overflow-y:auto">
+    <table class="ltable">
+      <thead><tr>
+        <th>TIME (UTC)</th><th>NODE</th><th>CLASS</th><th>SUBTYPE</th>
+        <th>CONF</th><th>BEARING</th><th>ELEV</th><th>ALT</th>
+        <th>SPEED</th><th>THREAT</th><th>MESH</th>
+      </tr></thead>
+      <tbody id="lbody"><tr><td colspan="11" class="empty">Loading...</td></tr></tbody>
     </table>
   </div>
+</div>
 
-  <div class="section">
-    <h2>Recent Detections</h2>
-    <table id="events-table">
-      <thead><tr><th>Time</th><th>Node</th><th>Class</th><th>Confidence</th><th>Bearing</th><th>Threat</th></tr></thead>
-      <tbody id="events-body"><tr><td colspan="6">Loading...</td></tr></tbody>
-    </table>
-  </div>
+<!-- FOOTER -->
+<footer>
+  <span>&#x25A0; SKYWALL SECTOR v""" + SERVER_VERSION + """</span>
+  <span id="ssest" style="color:var(--dim)">○ POLLING</span>
+  <span id="fnodes"></span>
+  <span class="ml" id="fuptime"></span>
+</footer>
 
-  <script>
-    async function fetchJSON(url) {
-      try { const r = await fetch(url); return await r.json(); } catch(e) { return null; }
-    }
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let allEvents = [], t0 = Date.now();
 
-    function formatTime(ts) {
-      if (!ts) return '-';
-      return new Date(ts * 1000).toLocaleTimeString();
-    }
+// Clock
+setInterval(() => {
+  const n = new Date();
+  $('clock').textContent = n.getUTCHours().toString().padStart(2,'0') + ':' +
+    n.getUTCMinutes().toString().padStart(2,'0') + ':' +
+    n.getUTCSeconds().toString().padStart(2,'0') + 'Z';
+}, 1000);
 
-    function threatBadge(level) {
-      return `<span class="badge badge-${level}">${level}</span>`;
-    }
+// Uptime
+setInterval(() => {
+  const s = Math.floor((Date.now()-t0)/1000);
+  $('fuptime').textContent = `SESSION ${String(Math.floor(s/3600)).padStart(2,'0')}:`+
+    `${String(Math.floor((s%3600)/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
+}, 1000);
 
-    async function refresh() {
-      const [stats, nodesResp, eventsResp] = await Promise.all([
-        fetchJSON('/api/v1/stats'),
-        fetchJSON('/api/v1/nodes'),
-        fetchJSON('/api/v1/events?limit=50'),
-      ]);
+// Helpers
+const utc = ts => ts ? new Date(ts*1000).toISOString().replace('T',' ').slice(0,19)+'Z' : '—';
+const ago = ts => { if(!ts) return '—'; const d=(Date.now()/1000-ts)|0;
+  return d<60?d+'s':d<3600?Math.round(d/60)+'m':Math.round(d/3600)+'h'; };
+const tbadge = lv => `<span class="badge b${lv||'NONE'}">${lv||'NONE'}</span>`;
+const mtag   = m  => { const k=(m||'UNKNOWN').toUpperCase(); return `<span class="mbadge m${k}">${k}</span>`; };
+const batt   = b  => {
+  if(b==null||b<0) return '—';
+  const p=(b*100)|0, c=p>50?'var(--green)':p>20?'var(--amber)':'var(--red)';
+  return `<span style="color:${c}">${p}%</span>`;
+};
+const cbar = c => {
+  const p=Math.round((c||0)*100);
+  const col=c>=.8?'var(--red)':c>=.5?'var(--amber)':'var(--acc)';
+  return `${p}%<span class="cbar"><span class="cfill" style="width:${p}%;background:${col}"></span></span>`;
+};
 
-      if (stats) {
-        document.getElementById('events-today').textContent  = stats.events_today  ?? '-';
-        document.getElementById('threats-today').textContent = stats.threats_today ?? '-';
-        document.getElementById('active-nodes').textContent  = stats.active_nodes  ?? '-';
-        document.getElementById('events-total').textContent  = stats.events_total  ?? '-';
-      }
+// Stats
+async function loadStats() {
+  try {
+    const d = await fetch('/api/v1/stats').then(r=>r.json());
+    $('s-et').textContent  = d.events_today  ?? '—';
+    $('s-th').textContent  = d.threats_today ?? '—';
+    $('s-an').textContent  = d.active_nodes  ?? '—';
+    $('s-tot').textContent = d.events_total  ?? '—';
+    $('s-ns').textContent  = `of ${d.total_nodes??0} registered`;
+    const tc = d.threats_today ?? 0;
+    $('tbadge').textContent = tc;
+    $('tbadge').className = tc>0 ? 'tbadge' : 'tbadge z';
+  } catch(_) {}
+}
 
-      if (nodesResp?.nodes) {
-        const tbody = document.getElementById('nodes-body');
-        const nodes = Object.values(nodesResp.nodes);
-        if (nodes.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="5" style="color:#555">No nodes registered</td></tr>';
-        } else {
-          tbody.innerHTML = nodes.map(n => `
-            <tr>
-              <td>${n.node_id?.substring(0,12) ?? 'unknown'}</td>
-              <td><span class="badge badge-${n.is_alive ? 'alive' : 'dead'}">${n.is_alive ? 'ALIVE' : 'DEAD'}</span></td>
-              <td>${n.mode ?? '-'}</td>
-              <td>${n.battery >= 0 ? (n.battery * 100).toFixed(0) + '%' : '-'}</td>
-              <td>${n.last_seen_ago}s ago</td>
-            </tr>
-          `).join('');
-        }
-      }
+// Nodes
+async function loadNodes() {
+  try {
+    const d = await fetch('/api/v1/nodes').then(r=>r.json());
+    const nodes = Object.values(d.nodes||{});
+    $('ncount').textContent = `${nodes.length} node${nodes.length!==1?'s':''}`;
+    $('fnodes').textContent = `${nodes.filter(n=>n.is_alive).length}/${nodes.length} ONLINE`;
+    const tb = $('nbody');
+    if(!nodes.length){ tb.innerHTML='<tr><td colspan="6" class="empty">Awaiting node registrations...</td></tr>'; return; }
+    nodes.sort((a,b)=>(b.last_seen??0)-(a.last_seen??0));
+    tb.innerHTML = nodes.map(n=>`<tr>
+      <td style="color:var(--acc);font-size:10px">${(n.node_id||'').substring(0,16)}</td>
+      <td><span class="${n.is_alive?'nalive':'ndead'}">${n.is_alive?'ALIVE':'DEAD'}</span></td>
+      <td>${mtag(n.mode)}</td>
+      <td>${batt(n.battery)}</td>
+      <td style="color:var(--acc)">${n.detection_count??0}</td>
+      <td style="color:var(--dim);font-size:10px">${ago(n.last_seen)}</td>
+    </tr>`).join('');
+  } catch(_) {}
+}
 
-      if (eventsResp?.events) {
-        const tbody = document.getElementById('events-body');
-        if (eventsResp.events.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="6" style="color:#555">No events recorded</td></tr>';
-        } else {
-          tbody.innerHTML = eventsResp.events.map(e => `
-            <tr>
-              <td>${formatTime(e.timestamp)}</td>
-              <td>${e.node_id?.substring(0,8) ?? '-'}</td>
-              <td>${e.drone_class}</td>
-              <td>${(e.confidence * 100).toFixed(0)}%</td>
-              <td>${e.bearing?.toFixed(0) ?? '-'}°</td>
-              <td>${threatBadge(e.threat_level ?? 'NONE')}</td>
-            </tr>
-          `).join('');
-        }
-      }
+// Events
+async function loadEvents() {
+  try {
+    const d = await fetch('/api/v1/events?limit=100').then(r=>r.json());
+    allEvents = d.events||[];
+    renderLog(allEvents);
+    renderFeed(allEvents);
+    $('lupd').textContent = 'UPDATED '+new Date().toISOString().slice(11,19)+'Z';
+  } catch(_) {}
+}
 
-      document.getElementById('last-refresh').textContent =
-        'Updated ' + new Date().toLocaleTimeString();
-    }
+function renderLog(evs) {
+  const tb = $('lbody');
+  if(!evs.length){ tb.innerHTML='<tr><td colspan="11" class="empty">No detections</td></tr>'; return; }
+  tb.innerHTML = evs.map(e=>`<tr class="${e.threat_level||'NONE'}">
+    <td style="color:var(--dim);font-size:10px">${utc(e.timestamp)}</td>
+    <td style="color:var(--acc);font-size:10px">${(e.node_id||'').substring(0,10)}</td>
+    <td style="font-weight:bold">${e.drone_class||'—'}</td>
+    <td style="color:var(--dim)">${e.subtype||'—'}</td>
+    <td>${cbar(e.confidence)}</td>
+    <td style="color:var(--text)">${e.bearing!=null?e.bearing.toFixed(0)+'°':'—'}</td>
+    <td style="color:var(--dim)">${e.elevation!=null?e.elevation.toFixed(0)+'°':'—'}</td>
+    <td style="color:var(--dim)">${e.altitude_m!=null?e.altitude_m+'m':'—'}</td>
+    <td style="color:var(--dim)">${e.speed_kmh!=null?e.speed_kmh+'km/h':'—'}</td>
+    <td>${tbadge(e.threat_level)}</td>
+    <td style="color:${e.mesh_confirmed?'var(--green)':'var(--dim)'}">${e.mesh_confirmed?'&#x2713; MESH':'—'}</td>
+  </tr>`).join('');
+}
 
-    refresh();
-    setInterval(refresh, 10000);
-  </script>
+function renderFeed(evs) {
+  const threats = evs.filter(e=>e.threat_level==='HIGH'||e.threat_level==='MEDIUM').slice(0,20);
+  $('acount').textContent = `${threats.length} alert${threats.length!==1?'s':''}`;
+  const fd = $('afeed');
+  if(!threats.length){ fd.innerHTML='<div class="empty">No active alerts</div>'; $('banner').className=''; return; }
+  fd.innerHTML = threats.map(e=>`<div class="aitem ${e.threat_level||'NONE'}">
+    <div>
+      <div class="aclass ${e.threat_level}">${e.drone_class||'UNKNOWN'}</div>
+      <div class="ameta">${(e.node_id||'').substring(0,10)} &bull; ${e.subtype||''}</div>
+      <div class="atime">${utc(e.timestamp)}</div>
+    </div>
+    <div class="abearing">${e.bearing!=null?e.bearing.toFixed(0)+'°':'—'}</div>
+  </div>`).join('');
+  const hi = evs.filter(e=>e.threat_level==='HIGH');
+  if(hi.length){
+    const h=hi[0];
+    $('btext').textContent=`THREAT DETECTED — ${h.drone_class||'?'} — BRG ${h.bearing!=null?h.bearing.toFixed(0)+'°':'?'} — NODE ${(h.node_id||'').substring(0,8)}`;
+    $('banner').className='show';
+  } else { $('banner').className=''; }
+}
+
+// SSE
+function connectSSE() {
+  const es = new EventSource('/api/v1/events/stream');
+  es.onopen = () => { $('ssest').textContent='&#x25CF; SSE LIVE'; $('ssest').style.color='var(--green)'; };
+  es.onerror = () => { $('ssest').textContent='&#x25CB; POLLING'; $('ssest').style.color='var(--dim)'; };
+  es.addEventListener('detection', e => {
+    const d = JSON.parse(e.data);
+    allEvents.unshift(d); if(allEvents.length>100) allEvents.pop();
+    renderLog(allEvents); renderFeed(allEvents); loadStats();
+  });
+  es.addEventListener('heartbeat', () => loadNodes());
+}
+
+// CSV export
+function exportCSV() {
+  if(!allEvents.length){ alert('No events to export.'); return; }
+  const h = ['timestamp','node_id','drone_class','subtype','confidence','bearing','elevation','altitude_m','speed_kmh','threat_level','mesh_confirmed'];
+  const rows = allEvents.map(e=>h.map(k=>JSON.stringify(e[k]??'')).join(','));
+  const blob = new Blob([[h.join(','),...rows].join('\\n')], {type:'text/csv'});
+  const a = Object.assign(document.createElement('a'),
+    {href:URL.createObjectURL(blob), download:`skywall_${Date.now()}.csv`});
+  a.click(); URL.revokeObjectURL(a.href);
+}
+
+// Boot
+connectSSE();
+Promise.all([loadStats(), loadNodes(), loadEvents()]);
+setInterval(() => Promise.all([loadStats(), loadNodes(), loadEvents()]), 5000);
+</script>
 </body>
 </html>"""
 

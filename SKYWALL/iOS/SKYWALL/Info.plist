@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+
+    <!-- ── Required Permissions ── -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>SKYWALL uses the microphone for acoustic drone detection using machine learning signal analysis on all three microphone channels simultaneously.</string>
+
+    <key>NSCameraUsageDescription</key>
+    <string>SKYWALL uses the camera to visually detect, identify, and track aerial targets with the telephoto and wide-angle lenses.</string>
+
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>SKYWALL uses your location to tag detection events with precise GPS coordinates for forensic documentation and multi-node triangulation.</string>
+
+    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+    <string>SKYWALL uses background location to continue tagging detection events when the app is running in the background.</string>
+
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>SKYWALL uses Bluetooth to control the pan/tilt servo mount (ESP32 BLE controller) for autonomous target tracking.</string>
+
+    <key>NSBluetoothPeripheralUsageDescription</key>
+    <string>SKYWALL uses Bluetooth to communicate with the pan/tilt servo controller.</string>
+
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>SKYWALL uses the local network to communicate with other SKYWALL nodes in the mesh detection network for multi-node triangulation.</string>
+
+    <!-- ── Bonjour Services (MultipeerConnectivity) ── -->
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_skywall._tcp</string>
+        <string>_skywall._udp</string>
+        <string>_multipeer._tcp</string>
+    </array>
+
+    <!-- ── App Transport Security: Block all outbound internet ── -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <false/>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
+
+    <!-- ── Background Modes ── -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>audio</string>
+        <string>bluetooth-central</string>
+        <string>location</string>
+        <string>processing</string>
+    </array>
+
+    <!-- ── Supported Orientations ── -->
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+
+    <!-- ── Bundle Info ── -->
+    <key>CFBundleDisplayName</key>
+    <string>SKYWALL</string>
+
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+
+    <key>CFBundleVersion</key>
+    <string>$(CURRENT_PROJECT_VERSION)</string>
+
+    <key>CFBundleShortVersionString</key>
+    <string>$(MARKETING_VERSION)</string>
+
+    <key>CFBundleName</key>
+    <string>$(PRODUCT_NAME)</string>
+
+    <key>CFBundlePackageType</key>
+    <string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+
+    <!-- ── Minimum OS Version ── -->
+    <key>MinimumOSVersion</key>
+    <string>17.0</string>
+
+    <!-- ── UI Settings ── -->
+    <key>UIRequiresFullScreen</key>
+    <true/>
+
+    <key>UIStatusBarStyle</key>
+    <string>UIStatusBarStyleLightContent</string>
+
+    <key>UIViewControllerBasedStatusBarAppearance</key>
+    <false/>
+
+    <key>UIUserInterfaceStyle</key>
+    <string>Dark</string>
+
+    <!-- ── Guided Access: prevent exit from app ── -->
+    <key>UIApplicationSupportsIndirectInputEvents</key>
+    <true/>
+
+    <!-- ── CoreML ── -->
+    <key>NSSupportsLiveActivities</key>
+    <false/>
+
+    <!-- ── Privacy Manifests ── -->
+    <key>NSPrivacyAccessedAPITypes</key>
+    <array>
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategorySystemBootTime</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>35F9.1</string>
+            </array>
+        </dict>
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>C617.1</string>
+            </array>
+        </dict>
+    </array>
+
+</dict>
+</plist>
