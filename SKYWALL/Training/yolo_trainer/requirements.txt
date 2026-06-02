@@ -1,0 +1,30 @@
+# SKYWALL YOLO Trainer - Training Dependencies
+# Python 3.10+
+
+# YOLOv8 (includes torch, torchvision)
+ultralytics>=8.2.0
+
+# CoreML export
+coremltools>=7.2
+
+# Image processing
+pillow>=10.2.0
+opencv-python>=4.9.0
+albumentations>=1.4.0       # Extra augmentation library
+
+# Data processing
+numpy>=1.26.0
+pandas>=2.2.0
+pyyaml>=6.0.1
+
+# Visualization
+matplotlib>=3.8.0
+seaborn>=0.13.0
+
+# ONNX (alternative export path)
+onnx>=1.16.0
+onnxruntime>=1.18.0
+
+# Utilities
+tqdm>=4.66.0
+requests>=2.31.0

@@ -1,0 +1,42 @@
+# SKYWALL LoRA Trainer - Training Dependencies
+# Python 3.10+
+# Requires CUDA GPU with ≥16GB VRAM for 4-bit QLoRA training
+# or Apple Silicon Mac with ≥32GB RAM for MPS training
+
+# Hugging Face ecosystem
+transformers>=4.40.0
+datasets>=2.19.0
+accelerate>=0.29.0
+tokenizers>=0.19.0
+huggingface-hub>=0.22.0
+
+# LoRA / PEFT
+peft>=0.10.0
+
+# Quantization (CUDA only - skip on Mac/CPU)
+bitsandbytes>=0.43.0         # 4-bit/8-bit quantization
+
+# Model training
+torch>=2.2.0
+torchvision>=0.17.0
+
+# Image support
+pillow>=10.2.0
+transformers[vision]         # Extra vision dependencies
+
+# CoreML export
+coremltools>=7.2
+
+# GGUF conversion (requires llama.cpp installed separately)
+# pip install llama-cpp-python
+
+# Evaluation
+scikit-learn>=1.4.0
+rouge-score>=0.1.2
+
+# Utilities
+numpy>=1.26.0
+tqdm>=4.66.0
+pyyaml>=6.0.1
+sentencepiece>=0.2.0         # Required by some tokenizers
+protobuf>=3.20.0

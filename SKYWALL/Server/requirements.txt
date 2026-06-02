@@ -1,0 +1,30 @@
+# SKYWALL Sector Server - Runtime Dependencies
+# Python 3.11+
+
+# Web framework
+aiohttp>=3.9.5
+aiohttp-cors>=0.7.0
+
+# Encryption
+cryptography>=42.0.0
+
+# Data
+numpy>=1.26.0
+
+# Database (built-in sqlite3 used; no extra dep needed)
+# SQLAlchemy optional for ORM if desired:
+# sqlalchemy>=2.0.0
+
+# HTTP client (included in aiohttp, explicit for clarity)
+aiofiles>=23.2.0
+
+# Utilities
+pyyaml>=6.0.1
+python-dotenv>=1.0.0
+
+# Monitoring (optional)
+psutil>=5.9.0               # System resource monitoring
+
+# Alert channels (optional - install as needed)
+# aiosmtplib>=3.0.0         # Email alerts
+# twilio>=8.0.0             # SMS alerts
